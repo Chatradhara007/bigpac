@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Encrypted Traffic Classifier</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+    </div>
+
+    <main class="container">
+        <header>
+            <h1>QUIC Early Packet Classifier</h1>
+            <p>Predicting application types using only the first 15 packets.</p>
+        </header>
+
+        <div class="dashboard">
+            <section class="simulator-panel glass">
+                <h2>Traffic Simulator</h2>
+                <p>Select an app to simulate network traffic generation:</p>
+                
+                <div class="app-selector">
+                    <button class="app-btn" data-app="youtube">YouTube</button>
+                    <button class="app-btn" data-app="discord">Discord</button>
+                    <button class="app-btn" data-app="spotify">Spotify</button>
+                    <button class="app-btn" data-app="whatsapp">WhatsApp</button>
+                    <button class="app-btn" data-app="facebook-web">Facebook</button>
+                </div>
+
+                <div class="packet-stream" id="packetStream">
+                    <!-- Packets will animate here -->
+                    <div class="placeholder-text">Waiting for traffic...</div>
+                </div>
+
+                <button id="analyzeBtn" class="primary-btn" disabled>Simulate & Analyze</button>
+            </section>
+
+            <section class="results-panel glass">
+                <h2>Classification Result</h2>
+                
+                <div class="result-display" id="resultDisplay">
+                    <div class="loader" id="loader" style="display: none;"></div>
+                    <div class="prediction-text" id="predictionText">--</div>
+                    <div class="confidence-bar-container" id="confContainer" style="display: none;">
+                        <div class="confidence-bar" id="confidenceBar"></div>
+                    </div>
+                    <div class="confidence-value" id="confidenceValue"></div>
+                </div>
+
+                <div class="top-classes" id="topClasses">
+                    <!-- Top 3 classes will appear here -->
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
