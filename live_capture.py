@@ -22,7 +22,14 @@ class Colors:
     BOLD = '\033[1m'
 
 MAX_PACKETS = 15
-MODEL_PATH = 'models/rf_model_n15.joblib'
+
+# Prefer the custom live-trained model if it exists
+if os.path.exists('models/my_custom_model.joblib'):
+    MODEL_PATH = 'models/my_custom_model.joblib'
+    print(f"{Colors.YELLOW}[*] Found Custom Live Model! Using my_custom_model.joblib{Colors.ENDC}")
+else:
+    MODEL_PATH = 'models/rf_model_n15.joblib'
+    print(f"{Colors.YELLOW}[*] Using default CESNET model: rf_model_n15.joblib{Colors.ENDC}")
 
 print(f"{Colors.CYAN}[*] Loading Random Forest Model...{Colors.ENDC}")
 try:
@@ -127,14 +134,32 @@ def analyze_flow(flow_key, flow):
         print(f"Confidence    : {top_prob:.1f}%")
         print(f"---------------------------------------")
 
+def get_active_interface():
+    from scapy.all import get_if_list
+    print(f"{Colors.YELLOW}[*] Auto-detecting active network interface...{Colors.ENDC}")
+    for i in get_if_list():
+        try:
+            # Sniff 1 packet. If it succeeds, this interface is active!
+            if len(sniff(iface=i, count=1, timeout=0.5)) > 0:
+                print(f"{Colors.GREEN}[+] Found active interface: {i}{Colors.ENDC}")
+                return i
+        except:
+            pass
+    return None
+
 if __name__ == "__main__":
     print(f"{Colors.BLUE}[*] Starting packet capture...{Colors.ENDC}")
     print(f"{Colors.BLUE}[*] Make sure you are running this terminal as Administrator!{Colors.ENDC}")
     print(f"{Colors.BLUE}[*] Open your browser and go to YouTube, Spotify, or Discord.{Colors.ENDC}\n")
     
+    active_iface = get_active_interface()
+    
     try:
-        # Sniff UDP packets on port 443
-        sniff(filter="udp port 443", prn=process_packet, store=False)
+        if active_iface:
+            sniff(iface=active_iface, filter="udp port 443", prn=process_packet, store=False)
+        else:
+            print(f"{Colors.RED}[!] Could not auto-detect interface. Falling back to default.{Colors.ENDC}")
+            sniff(filter="udp port 443", prn=process_packet, store=False)
     except Exception as e:
         print(f"{Colors.RED}[!] Sniffing failed. Do you have Npcap/Wireshark installed?{Colors.ENDC}")
         print(f"Error: {e}")
