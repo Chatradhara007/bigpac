@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import socket
 from collections import deque, Counter
 import numpy as np
 import joblib
@@ -23,53 +24,66 @@ class Colors:
     BOLD = '\033[1m'
 
 MAX_PACKETS = 15
+IDLE_RESET_SECONDS = 3.5  # Reset connection after 3.5s idle to catch new media bursts (e.g. video starting)
 
-# Prefer the custom live-trained model if it exists. That model is always
-# trained on fixed 15-packet rows (see live_collector.py), so it only has
-# one valid trigger point: MAX_PACKETS.
+# Choose between the 192k-sample CESNET model (default) or the custom live model
 models_by_n = {}
-if os.path.exists('models/my_custom_model.joblib'):
-    print(f"{Colors.YELLOW}[*] Found Custom Live Model! Using my_custom_model.joblib{Colors.ENDC}")
+use_custom = "--custom" in sys.argv
+
+if use_custom and os.path.exists('models/my_custom_model.joblib'):
+    print(f"{Colors.YELLOW}[*] Mode: Custom Live-Trained Model (models/my_custom_model.joblib){Colors.ENDC}")
     try:
         models_by_n[MAX_PACKETS] = joblib.load('models/my_custom_model.joblib')
     except Exception as e:
         print(f"{Colors.RED}[!] Error loading custom model: {e}{Colors.ENDC}")
         sys.exit(1)
 else:
-    print(f"{Colors.YELLOW}[*] Using default CESNET models{Colors.ENDC}")
-    # Load a model for every N we actually have a matching trained model for.
-    # This lets us classify at N=10 using a model that was trained on
-    # 10-packet vectors, instead of feeding a partially zero-padded vector
-    # into the N=15 model.
+    print(f"{Colors.GREEN}[*] Mode: 192k-Sample Month-Long CESNET Model (10 classes){Colors.ENDC}")
     for n in (10, 15):
         path = f'models/rf_model_n{n}.joblib'
         if os.path.exists(path):
             models_by_n[n] = joblib.load(path)
             print(f"{Colors.GREEN}[+] Loaded {path}{Colors.ENDC}")
+    if os.path.exists('models/my_custom_model.joblib'):
+        print(f"{Colors.CYAN}[*] Tip: Run 'python live_capture.py --custom' to use your custom self-trained model.{Colors.ENDC}")
 
 if not models_by_n:
     print(f"{Colors.RED}[!] No models found in models/. Run model_pipeline.py first.{Colors.ENDC}")
     sys.exit(1)
 
 TRIGGER_LEVELS = sorted(models_by_n.keys())      # e.g. [10, 15] or [15]
-MIN_TRIGGER_PACKETS = TRIGGER_LEVELS[0]
 FINAL_LEVEL = TRIGGER_LEVELS[-1]
 
-print(f"{Colors.GREEN}[+] Ready. Will classify at: {TRIGGER_LEVELS} packets{Colors.ENDC}")
+print(f"{Colors.GREEN}[+] Classifier Ready. Evaluates at: {TRIGGER_LEVELS} packets{Colors.ENDC}")
 
 # Dictionary to hold connection state
 flows = {}
 last_seen_ip = {}
+dns_cache = {}
 
-# Rolling window of recent final-level predictions, used to smooth out the
-# "glitching" that comes from many parallel QUIC connections (e.g. video CDN,
-# ads, analytics) firing different single-flow predictions within a second
-# or two of each other on the same page load.
+# Rolling window of recent final-level predictions for session smoothing
 RECENT_WINDOW_SECONDS = 3.0
 recent_predictions = deque()  # (timestamp, prediction, confidence)
 
 tcp_fallback_count = 0
 quic_flow_count = 0
+
+def resolve_hostname(ip):
+    if ip in dns_cache:
+        return dns_cache[ip]
+    try:
+        host = socket.gethostbyaddr(ip)[0]
+        if "1e100.net" in host:
+            dns_cache[ip] = f"{host} [Google/YouTube]"
+        elif "cloudflare" in host:
+            dns_cache[ip] = f"{host} [Cloudflare/Discord]"
+        elif "googleusercontent" in host:
+            dns_cache[ip] = f"{host} [Google Cloud/Snapchat]"
+        else:
+            dns_cache[ip] = host
+    except Exception:
+        dns_cache[ip] = ip
+    return dns_cache[ip]
 
 def get_flow_key(packet):
     if not packet.haslayer(IP) or not packet.haslayer(UDP):
@@ -84,7 +98,6 @@ def get_flow_key(packet):
     if src_port != 443 and dst_port != 443:
         return None, None
         
-    # The client is usually the one NOT on port 443
     if dst_port == 443:
         return (src_ip, src_port, dst_ip, dst_port), 1
     else:
@@ -98,11 +111,12 @@ def process_packet(packet):
         return
         
     quic_flow_count += 1
+    current_time = packet.time
     
     if flow_key not in flows:
         flows[flow_key] = {
             'packets': [],
-            'last_time': packet.time,
+            'last_time': current_time,
             'processed': False,
             'triggered_levels': set(),
             'server_ip': flow_key[2]
@@ -110,18 +124,26 @@ def process_packet(packet):
         
     flow = flows[flow_key]
     
+    # FLOW IDLE RESET:
+    # In HTTP/3 QUIC, Chrome keeps connections open for minutes. When you search,
+    # it completes 15 packets. When you then click a video 4 seconds later, Chrome
+    # reuses the SAME connection. If we don't reset idle flows, the video stream
+    # would be permanently ignored.
+    if current_time - flow['last_time'] > IDLE_RESET_SECONDS:
+        flow['packets'] = []
+        flow['processed'] = False
+        flow['triggered_levels'] = set()
+    
     if flow['processed']:
         return
         
-    current_time = packet.time
     iat = (current_time - flow['last_time']) * 1000 
-    
     if len(flow['packets']) == 0:
         iat = 0.0
         
     flow['last_time'] = current_time
-    # CESNET-QUIC22's PPI sizes are "payload size after transport headers"
-    # (i.e. after the UDP header) — NOT the full IP packet length.
+    
+    # Measure transport payload size (matches CESNET PPI definition)
     if packet.haslayer(UDP):
         size = len(bytes(packet[UDP].payload))
     else:
@@ -135,7 +157,7 @@ def process_packet(packet):
     
     count = len(flow['packets'])
     
-    # Trigger exactly once per level we have a real model for (e.g. 10, then 15).
+    # Trigger prediction for each configured packet depth (e.g. 10, then 15)
     for level in TRIGGER_LEVELS:
         if count == level and level not in flow['triggered_levels']:
             flow['triggered_levels'].add(level)
@@ -146,6 +168,7 @@ def process_packet(packet):
 
 def analyze_flow(flow_key, flow, n_packets):
     server_ip = flow_key[2]
+    hostname = resolve_hostname(server_ip)
     model = models_by_n[n_packets]
 
     features = []
@@ -157,47 +180,52 @@ def analyze_flow(flow_key, flow, n_packets):
     prediction = model.predict(X)[0]
     probabilities = model.predict_proba(X)[0]
     
-    # Get confidence
     top_prob = float(np.max(probabilities)) * 100
-    
-    # Sort classes by probability to see runner-up
     sorted_indices = np.argsort(probabilities)[::-1]
     second_prob = float(probabilities[sorted_indices[1]]) * 100 if len(sorted_indices) > 1 else 0
     second_class = model.classes_[sorted_indices[1]] if len(sorted_indices) > 1 else ""
     
-    # Debounce: Don't spam the exact same server IP repeatedly within 2 seconds
+    # Debounce: Don't spam the exact same server IP repeatedly within 2.0s
     current_time = time.time()
     if server_ip in last_seen_ip and (current_time - last_seen_ip[server_ip]) < 2.0:
         return
     last_seen_ip[server_ip] = current_time
     
-    # Print prediction (threshold >= 30%)
-    if top_prob >= 30.0:
-        tag = f"early @ {n_packets}pkt" if n_packets != FINAL_LEVEL else f"final @ {n_packets}pkt"
-        print(f"\n{Colors.BOLD}--- Live Connection Captured ({tag}) ---{Colors.ENDC}")
-        print(f"Target Server : {server_ip}")
-        print(f"Prediction    : {Colors.YELLOW}{prediction.upper()}{Colors.ENDC} ({top_prob:.1f}%)")
+    tag = f"early @ {n_packets}pkt" if n_packets != FINAL_LEVEL else f"final @ {n_packets}pkt"
+    
+    # CONFIDENCE ROUTING:
+    # If confidence is under 50%, flag as UNCERTAIN / BACKGROUND rather than misleadingly
+    # presenting a weak 35% guess as a confident classification.
+    if top_prob >= 50.0:
+        color = Colors.GREEN if top_prob >= 70.0 else Colors.YELLOW
+        print(f"\n{Colors.BOLD}--- Live QUIC Connection Captured ({tag}) ---{Colors.ENDC}")
+        print(f"Target Server : {server_ip} ({hostname})")
+        print(f"Prediction    : {color}{prediction.upper()}{Colors.ENDC} ({top_prob:.1f}%)")
         if second_prob > 15.0:
             print(f"Runner-up     : {second_class.upper()} ({second_prob:.1f}%)")
+    elif top_prob >= 30.0:
+        # Informative note for ambiguous background handshakes
+        print(f"\n{Colors.BOLD}--- Live QUIC Connection Captured ({tag}) ---{Colors.ENDC}")
+        print(f"Target Server : {server_ip} ({hostname})")
+        print(f"Prediction    : {Colors.CYAN}UNCERTAIN / BACKGROUND{Colors.ENDC} (Top Guess: {prediction.upper()} {top_prob:.1f}%, Runner-up: {second_class.upper()} {second_prob:.1f}%)")
+        print(f"Note          : Handshake pattern is generic; awaiting media streaming burst.")
 
-        # Only feed FINAL_LEVEL predictions into the session consensus
-        if n_packets == FINAL_LEVEL:
-            recent_predictions.append((current_time, prediction, top_prob))
-            while recent_predictions and current_time - recent_predictions[0][0] > RECENT_WINDOW_SECONDS:
-                recent_predictions.popleft()
+    # Only feed FINAL_LEVEL confident predictions into the session consensus
+    if n_packets == FINAL_LEVEL and top_prob >= 50.0:
+        recent_predictions.append((current_time, prediction, top_prob))
+        while recent_predictions and current_time - recent_predictions[0][0] > RECENT_WINDOW_SECONDS:
+            recent_predictions.popleft()
 
-            if len(recent_predictions) >= 2:
-                votes = Counter(p for _, p, _ in recent_predictions)
-                consensus, vote_count = votes.most_common(1)[0]
-                avg_conf = np.mean([c for _, p, c in recent_predictions if p == consensus])
-                print(f"Session view  : {Colors.CYAN}{consensus.upper()}{Colors.ENDC} "
-                      f"({vote_count}/{len(recent_predictions)} recent flows, avg {avg_conf:.1f}%) "
-                      f"— multiple parallel connections in the last {RECENT_WINDOW_SECONDS:.0f}s are normal")
-        print(f"---------------------------------------")
+        if len(recent_predictions) >= 2:
+            votes = Counter(p for _, p, _ in recent_predictions)
+            consensus, vote_count = votes.most_common(1)[0]
+            avg_conf = np.mean([c for _, p, c in recent_predictions if p == consensus])
+            print(f"Session view  : {Colors.CYAN}{consensus.upper()}{Colors.ENDC} "
+                  f"({vote_count}/{len(recent_predictions)} parallel flows agree, avg {avg_conf:.1f}%)")
+    print(f"---------------------------------------")
 
 def get_active_interface():
     from scapy.all import get_if_list, get_if_addr
-    import socket
     print(f"{Colors.YELLOW}[*] Auto-detecting active network interface...{Colors.ENDC}")
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -210,7 +238,7 @@ def get_active_interface():
                 if get_if_addr(iface) == local_ip:
                     print(f"{Colors.GREEN}[+] Found active interface: {iface} (IP: {local_ip}){Colors.ENDC}")
                     return iface
-            except:
+            except Exception:
                 pass
     except Exception as e:
         print(f"Error finding route: {e}")
