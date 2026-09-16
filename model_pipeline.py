@@ -35,11 +35,13 @@ def train_and_evaluate_for_n(df, n_packets):
     acc = accuracy_score(y_test, y_pred)
     print(f"Accuracy for N={n_packets}: {acc * 100:.2f}%")
     
-    # Save the model if it's our chosen production model (N=15)
-    if n_packets == 15:
-        os.makedirs("models", exist_ok=True)
-        joblib.dump(clf, f"models/rf_model_n{n_packets}.joblib")
-        print(f"Saved model to models/rf_model_n{n_packets}.joblib")
+    # Save every N we train. This matters for live inference: a flow that's
+    # only produced 10 real packets so far should be scored by the model that
+    # was actually trained on 10-packet vectors, not by the N=15 model with
+    # 5 zero-padded slots tacked on.
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(clf, f"models/rf_model_n{n_packets}.joblib")
+    print(f"Saved model to models/rf_model_n{n_packets}.joblib")
     
     return acc
 
@@ -61,6 +63,5 @@ def run_experiment(filepath="data/processed_data.parquet", n_values=[5, 10, 15, 
 
 if __name__ == "__main__":
     data_path = "C:/Users/CHATRADHARA/.gemini/antigravity/scratch/traffic_classifier/data/processed_data.parquet"
-    # Ensure working dir is set properly
     os.chdir("C:/Users/CHATRADHARA/.gemini/antigravity/scratch/traffic_classifier")
     run_experiment(data_path)

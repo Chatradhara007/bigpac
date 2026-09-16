@@ -87,7 +87,15 @@ def process_packet(packet):
         iat = 0.0
         
     flow['last_time'] = current_time
-    size = len(packet[IP])
+    # Match CESNET-QUIC22's convention: payload size after transport headers,
+    # not the full IP packet length. Keeps this data compatible with
+    # data_processor.py's output if you ever combine the two.
+    if packet.haslayer(UDP):
+        size = len(bytes(packet[UDP].payload))
+    elif packet.haslayer(TCP):
+        size = len(bytes(packet[TCP].payload))
+    else:
+        size = len(packet[IP].payload)
     
     flow['packets'].append({
         'size': size,
