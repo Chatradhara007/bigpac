@@ -2,7 +2,7 @@ import os
 import sys
 import time
 import csv
-from scapy.all import sniff, IP, UDP
+from scapy.all import sniff, IP, UDP, TCP
 
 # Windows console colors
 import ctypes
@@ -38,13 +38,20 @@ captured_count = 0
 TARGET_LABEL = ""
 
 def get_flow_key(packet):
-    if not packet.haslayer(IP) or not packet.haslayer(UDP):
+    if not packet.haslayer(IP):
         return None, None
         
     src_ip = packet[IP].src
     dst_ip = packet[IP].dst
-    src_port = packet[UDP].sport
-    dst_port = packet[UDP].dport
+    
+    if packet.haslayer(UDP):
+        src_port = packet[UDP].sport
+        dst_port = packet[UDP].dport
+    elif packet.haslayer(TCP):
+        src_port = packet[TCP].sport
+        dst_port = packet[TCP].dport
+    else:
+        return None, None
     
     if src_port != 443 and dst_port != 443:
         return None, None
@@ -104,16 +111,26 @@ def save_flow(flow):
         writer.writerow(row)
 
 def get_active_interface():
-    from scapy.all import get_if_list
+    from scapy.all import get_if_list, get_if_addr
+    import socket
     print(f"{Colors.YELLOW}[*] Auto-detecting active network interface...{Colors.ENDC}")
-    for i in get_if_list():
-        try:
-            # Sniff 1 packet. If it succeeds, this interface is active!
-            if len(sniff(iface=i, count=1, timeout=0.5)) > 0:
-                print(f"{Colors.GREEN}[+] Found active interface: {i}{Colors.ENDC}")
-                return i
-        except:
-            pass
+    try:
+        # Connect to internet to get our local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        
+        # Find the scapy interface that has this IP
+        for iface in get_if_list():
+            try:
+                if get_if_addr(iface) == local_ip:
+                    print(f"{Colors.GREEN}[+] Found active interface: {iface} (IP: {local_ip}){Colors.ENDC}")
+                    return iface
+            except:
+                pass
+    except Exception as e:
+        print(f"Error finding route: {e}")
     return None
 
 if __name__ == "__main__":
@@ -134,10 +151,10 @@ if __name__ == "__main__":
     
     try:
         if active_iface:
-            sniff(iface=active_iface, filter="udp port 443", prn=process_packet, store=False)
+            sniff(iface=active_iface, filter="port 443", prn=process_packet, store=False)
         else:
             print(f"{Colors.RED}[!] Could not auto-detect interface. Falling back to default.{Colors.ENDC}")
-            sniff(filter="udp port 443", prn=process_packet, store=False)
+            sniff(filter="port 443", prn=process_packet, store=False)
     except KeyboardInterrupt:
         print(f"\n{Colors.GREEN}[*] Collection stopped. Total captured: {captured_count}{Colors.ENDC}")
     except Exception as e:

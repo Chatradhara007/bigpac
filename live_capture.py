@@ -3,7 +3,7 @@ import sys
 import time
 import numpy as np
 import joblib
-from scapy.all import sniff, IP, UDP
+from scapy.all import sniff, IP, UDP, TCP
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -40,20 +40,26 @@ except Exception as e:
     sys.exit(1)
 
 # Dictionary to hold connection state
-# Key: (Client IP, Client Port, Server IP, Server Port)
-# Value: { 'packets': [], 'last_time': float, 'processed': bool }
 flows = {}
 
 def get_flow_key(packet):
-    if not packet.haslayer(IP) or not packet.haslayer(UDP):
+    if not packet.haslayer(IP):
         return None, None
         
     src_ip = packet[IP].src
     dst_ip = packet[IP].dst
-    src_port = packet[UDP].sport
-    dst_port = packet[UDP].dport
     
-    # We only care about QUIC traffic (port 443)
+    # Check for either UDP or TCP
+    if packet.haslayer(UDP):
+        src_port = packet[UDP].sport
+        dst_port = packet[UDP].dport
+    elif packet.haslayer(TCP):
+        src_port = packet[TCP].sport
+        dst_port = packet[TCP].dport
+    else:
+        return None, None
+    
+    # We care about HTTPS / QUIC traffic (port 443)
     if src_port != 443 and dst_port != 443:
         return None, None
         
@@ -64,6 +70,8 @@ def get_flow_key(packet):
     else:
         # Inbound (Server -> Client)
         return (dst_ip, dst_port, src_ip, src_port), -1
+
+MIN_TRIGGER_PACKETS = 10  # Classify faster! Don't wait for all 15
 
 def process_packet(packet):
     flow_key, direction = get_flow_key(packet)
@@ -81,39 +89,37 @@ def process_packet(packet):
         
     flow = flows[flow_key]
     
-    # If we already classified this connection, ignore it to save CPU
     if flow['processed']:
         return
         
-    # Calculate IAT in milliseconds
     current_time = packet.time
     iat = (current_time - flow['last_time']) * 1000 
     
-    # Very first packet has 0 IAT
     if len(flow['packets']) == 0:
         iat = 0.0
         
     flow['last_time'] = current_time
-    
-    # Get IP total length
     size = len(packet[IP])
     
-    # Save packet info
     flow['packets'].append({
         'size': size,
         'dir': direction,
         'iat': iat
     })
     
-    # If we hit 15 packets, run the classification!
-    if len(flow['packets']) == MAX_PACKETS:
+    # Fast trigger: Once we have enough packets (10), classify immediately!
+    if len(flow['packets']) >= MIN_TRIGGER_PACKETS and not flow['processed']:
         flow['processed'] = True
         analyze_flow(flow_key, flow)
 
 def analyze_flow(flow_key, flow):
     features = []
-    for p in flow['packets']:
+    for p in flow['packets'][:MAX_PACKETS]:
         features.extend([p['size'], p['dir'], p['iat']])
+        
+    # Zero-pad remaining packets if triggered early (e.g., at 10 packets)
+    while len(features) < MAX_PACKETS * 3:
+        features.extend([0, 0, 0.0])
         
     X = np.array(features).reshape(1, -1)
     
@@ -122,29 +128,45 @@ def analyze_flow(flow_key, flow):
     
     # Get confidence
     top_prob = float(np.max(probabilities)) * 100
+    top_idx = np.argmax(probabilities)
     
-    # FILTER NOISE: Only print if confidence is reasonably high
-    if top_prob > 60.0:
-        client_ip = flow_key[0]
-        server_ip = flow_key[2]
-        
-        print(f"\n{Colors.BOLD}--- Live QUIC Connection Captured ---{Colors.ENDC}")
-        print(f"Target Server : {server_ip}")
-        print(f"Prediction    : {Colors.YELLOW}{prediction.upper()}{Colors.ENDC}")
-        print(f"Confidence    : {top_prob:.1f}%")
-        print(f"---------------------------------------")
+    # Sort classes by probability to see runner-up
+    sorted_indices = np.argsort(probabilities)[::-1]
+    second_prob = float(probabilities[sorted_indices[1]]) * 100 if len(sorted_indices) > 1 else 0
+    second_class = model.classes_[sorted_indices[1]] if len(sorted_indices) > 1 else ""
+    
+    # Print EVERY prediction unconditionally so nothing is hidden
+    client_ip = flow_key[0]
+    server_ip = flow_key[2]
+    
+    print(f"\n{Colors.BOLD}--- Live QUIC Connection Captured ---{Colors.ENDC}")
+    print(f"Target Server : {server_ip}")
+    print(f"Prediction    : {Colors.YELLOW}{prediction.upper()}{Colors.ENDC} ({top_prob:.1f}%)")
+    if second_prob > 10.0:
+        print(f"Runner-up     : {second_class.upper()} ({second_prob:.1f}%)")
+    print(f"---------------------------------------")
 
 def get_active_interface():
-    from scapy.all import get_if_list
+    from scapy.all import get_if_list, get_if_addr
+    import socket
     print(f"{Colors.YELLOW}[*] Auto-detecting active network interface...{Colors.ENDC}")
-    for i in get_if_list():
-        try:
-            # Sniff 1 packet. If it succeeds, this interface is active!
-            if len(sniff(iface=i, count=1, timeout=0.5)) > 0:
-                print(f"{Colors.GREEN}[+] Found active interface: {i}{Colors.ENDC}")
-                return i
-        except:
-            pass
+    try:
+        # Connect to internet to get our local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        
+        # Find the scapy interface that has this IP
+        for iface in get_if_list():
+            try:
+                if get_if_addr(iface) == local_ip:
+                    print(f"{Colors.GREEN}[+] Found active interface: {iface} (IP: {local_ip}){Colors.ENDC}")
+                    return iface
+            except:
+                pass
+    except Exception as e:
+        print(f"Error finding route: {e}")
     return None
 
 if __name__ == "__main__":
@@ -156,10 +178,10 @@ if __name__ == "__main__":
     
     try:
         if active_iface:
-            sniff(iface=active_iface, filter="udp port 443", prn=process_packet, store=False)
+            sniff(iface=active_iface, filter="port 443", prn=process_packet, store=False)
         else:
             print(f"{Colors.RED}[!] Could not auto-detect interface. Falling back to default.{Colors.ENDC}")
-            sniff(filter="udp port 443", prn=process_packet, store=False)
+            sniff(filter="port 443", prn=process_packet, store=False)
     except Exception as e:
         print(f"{Colors.RED}[!] Sniffing failed. Do you have Npcap/Wireshark installed?{Colors.ENDC}")
         print(f"Error: {e}")
