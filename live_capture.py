@@ -185,33 +185,37 @@ def analyze_flow(flow_key, flow, n_packets):
     second_prob = float(probabilities[sorted_indices[1]]) * 100 if len(sorted_indices) > 1 else 0
     second_class = model.classes_[sorted_indices[1]] if len(sorted_indices) > 1 else ""
     
-    # Debounce: Don't spam the exact same server IP repeatedly within 2.0s
+    # Debounce: Don't spam duplicate predictions for the same (server_ip, n_packets) within 2.0s
     current_time = time.time()
-    if server_ip in last_seen_ip and (current_time - last_seen_ip[server_ip]) < 2.0:
+    debounce_key = (server_ip, n_packets)
+    if debounce_key in last_seen_ip and (current_time - last_seen_ip[debounce_key]) < 2.0:
         return
-    last_seen_ip[server_ip] = current_time
+    last_seen_ip[debounce_key] = current_time
     
     tag = f"early @ {n_packets}pkt" if n_packets != FINAL_LEVEL else f"final @ {n_packets}pkt"
     
-    # CONFIDENCE ROUTING:
-    # If confidence is under 50%, flag as UNCERTAIN / BACKGROUND rather than misleadingly
-    # presenting a weak 35% guess as a confident classification.
-    if top_prob >= 50.0:
-        color = Colors.GREEN if top_prob >= 70.0 else Colors.YELLOW
+    # CALIBRATED CONFIDENCE ROUTING FOR 10 CLASSES:
+    # Baseline random chance is 10.0%. A probability >= 35% represents significant confidence.
+    # We report the true prediction clearly, using color to distinguish confidence depth.
+    margin = top_prob - second_prob
+    is_confident = top_prob >= 50.0 or (top_prob >= 35.0 and margin >= 8.0)
+    
+    if is_confident:
+        color = Colors.GREEN if top_prob >= 60.0 else Colors.YELLOW
         print(f"\n{Colors.BOLD}--- Live QUIC Connection Captured ({tag}) ---{Colors.ENDC}")
         print(f"Target Server : {server_ip} ({hostname})")
         print(f"Prediction    : {color}{prediction.upper()}{Colors.ENDC} ({top_prob:.1f}%)")
-        if second_prob > 15.0:
+        if second_prob > 12.0:
             print(f"Runner-up     : {second_class.upper()} ({second_prob:.1f}%)")
-    elif top_prob >= 30.0:
-        # Informative note for ambiguous background handshakes
+    else:
+        # Truly ambiguous handshakes where top classes are tied or low
         print(f"\n{Colors.BOLD}--- Live QUIC Connection Captured ({tag}) ---{Colors.ENDC}")
         print(f"Target Server : {server_ip} ({hostname})")
-        print(f"Prediction    : {Colors.CYAN}UNCERTAIN / BACKGROUND{Colors.ENDC} (Top Guess: {prediction.upper()} {top_prob:.1f}%, Runner-up: {second_class.upper()} {second_prob:.1f}%)")
+        print(f"Prediction    : {Colors.CYAN}{prediction.upper()} (Ambiguous){Colors.ENDC} ({top_prob:.1f}%, Runner-up: {second_class.upper()} {second_prob:.1f}%)")
         print(f"Note          : Handshake pattern is generic; awaiting media streaming burst.")
 
-    # Only feed FINAL_LEVEL confident predictions into the session consensus
-    if n_packets == FINAL_LEVEL and top_prob >= 50.0:
+    # Feed FINAL_LEVEL predictions into the session consensus window
+    if n_packets == FINAL_LEVEL:
         recent_predictions.append((current_time, prediction, top_prob))
         while recent_predictions and current_time - recent_predictions[0][0] > RECENT_WINDOW_SECONDS:
             recent_predictions.popleft()
