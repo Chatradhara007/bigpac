@@ -27,7 +27,7 @@ def train_and_evaluate_for_n(df, n_packets):
     
     # 3. Train Model
     print(f"Training Random Forest with N={n_packets} packets ({len(feature_cols)} features)...")
-    clf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+    clf = RandomForestClassifier(n_estimators=100, class_weight='balanced', random_state=42, n_jobs=-1)
     clf.fit(X_train, y_train)
     
     # 4. Evaluate
