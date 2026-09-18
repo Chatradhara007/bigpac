@@ -24,7 +24,6 @@ class Colors:
     BOLD = '\033[1m'
 
 MAX_PACKETS = 15
-IDLE_RESET_SECONDS = 3.5  # Reset connection after 3.5s idle to catch new media bursts (e.g. video starting)
 
 # Choose between the 192k-sample CESNET model (default) or the custom live model
 models_by_n = {}
@@ -113,7 +112,22 @@ def process_packet(packet):
     quic_flow_count += 1
     current_time = packet.time
     
+    # Measure transport payload size (matches CESNET PPI definition)
+    if packet.haslayer(UDP):
+        size = len(bytes(packet[UDP].payload))
+    else:
+        size = len(packet[IP].payload)
+        
+    # RFC 9000 & CESNET-QUIC22 ALIGNMENT:
+    # In the dataset, 100% of flows begin at Packet 0 with:
+    # 1. Direction = +1 (Client -> Server)
+    # 2. Size >= 1150 bytes (RFC 9000 mandatory padded Client Initial)
+    # If a packet arrives for an unknown flow that is NOT a Client Initial (e.g. dir=-1
+    # or size < 1150), it is residual mid-stream traffic from an already-open tab.
+    # We ignore mid-stream packets so we only classify genuine, synchronized handshakes!
     if flow_key not in flows:
+        if direction != 1 or size < 1150:
+            return  # Skip mid-stream packet; wait for a fresh handshake
         flows[flow_key] = {
             'packets': [],
             'last_time': current_time,
@@ -124,16 +138,6 @@ def process_packet(packet):
         
     flow = flows[flow_key]
     
-    # FLOW IDLE RESET:
-    # In HTTP/3 QUIC, Chrome keeps connections open for minutes. When you search,
-    # it completes 15 packets. When you then click a video 4 seconds later, Chrome
-    # reuses the SAME connection. If we don't reset idle flows, the video stream
-    # would be permanently ignored.
-    if current_time - flow['last_time'] > IDLE_RESET_SECONDS:
-        flow['packets'] = []
-        flow['processed'] = False
-        flow['triggered_levels'] = set()
-    
     if flow['processed']:
         return
         
@@ -142,12 +146,6 @@ def process_packet(packet):
         iat = 0.0
         
     flow['last_time'] = current_time
-    
-    # Measure transport payload size (matches CESNET PPI definition)
-    if packet.haslayer(UDP):
-        size = len(bytes(packet[UDP].payload))
-    else:
-        size = len(packet[IP].payload)
     
     flow['packets'].append({
         'size': size,
