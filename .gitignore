@@ -31,3 +31,4 @@ results/
 __pycache__/
 *.joblib
 *.parquet
+%TEMP%/
