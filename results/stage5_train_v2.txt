@@ -1,0 +1,4 @@
+BigPAC v2 training 2026-09-28T00:26:02
+python 3.14.4, scikit-learn 1.8.0, numpy 2.4.4, pandas 3.0.2
+excluded networks ['home-phone']: 180 flows dropped
+live: data/live_labelled.csv [258e0ddd2357360e] 2258 flows; cesnet: data/processed_data.parquet [61af198d10b00b55] 192713 flows

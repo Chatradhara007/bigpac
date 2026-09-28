@@ -1,0 +1,8 @@
+{
+  "known_accuracy": 0.30843373493975906,
+  "known_macro_f1": 0.24122383565317057,
+  "open_world_accuracy": 0.13141683778234087,
+  "shift_auc": 0.9999291343570361,
+  "n_live": 1948,
+  "n_known": 830
+}

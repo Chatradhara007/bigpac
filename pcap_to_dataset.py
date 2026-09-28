@@ -10,6 +10,8 @@ model feature.
 Usage
   python pcap_to_dataset.py convert data/captures/*.pcapng --network home
   python pcap_to_dataset.py report  [--csv data/live_labelled.csv]
+  python pcap_to_dataset.py relabel                 # re-apply current SNI rules
+  python pcap_to_dataset.py merge friend.csv        # add a teammate's flows
 
 Requires tshark (Wireshark) >= 3.6 on PATH, or pass --tshark PATH.
 Validated with TShark 4.2.2 (see IMPLEMENTATION_STATUS.md, Stage 1).
@@ -25,7 +27,7 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 
-CONVERTER_VERSION = "stage1-v1"
+CONVERTER_VERSION = "stage1-v2"   # v2: instagram.*.fbcdn.net -> instagram
 MAX_PKTS = 30
 DEFAULT_CSV = os.path.join("data", "live_labelled.csv")
 
@@ -49,6 +51,13 @@ APP_RULES = [
                 "byteoversea.com", "ibytedtos.com")),
     ("microsoft-outlook", ("outlook.office.com", "outlook.office365.com",
                            "outlook.live.com")),
+]
+
+# Checked BEFORE APP_RULES: (app, host prefix, domain suffix). Instagram serves
+# its photos/videos from instagram.<site>.fna.fbcdn.net, which would otherwise
+# match facebook-web via fbcdn.net (bug in stage1-v1, fixed with `relabel`).
+PREFIX_RULES = [
+    ("instagram", "instagram.", ".fbcdn.net"),
 ]
 
 # Outer SNIs used by Encrypted Client Hello. The real destination is hidden,
@@ -78,6 +87,9 @@ def sni_to_app(sni):
     s = sni.strip().lower().rstrip(".")
     if any(s == x or s.endswith("." + x) for x in ECH_OUTER_NAMES):
         return None
+    for app, prefix, suffix in PREFIX_RULES:
+        if s.startswith(prefix) and s.endswith(suffix):
+            return app
     for app, suffixes in APP_RULES:
         if any(s == x or s.endswith("." + x) for x in suffixes):
             return app
@@ -277,6 +289,61 @@ def cmd_convert(args):
     print(f"appended {total['written']} flows to {args.out}")
 
 
+def cmd_relabel(args):
+    """Recompute every label from its stored SNI with the current rules."""
+    with open(args.csv, newline="", encoding="utf-8") as fh:
+        r = csv.DictReader(fh)
+        if r.fieldnames != HEADER:
+            sys.exit(f"{args.csv}: unexpected header")
+        rows = list(r)
+    backup = args.csv + ".bak"
+    shutil.copyfile(args.csv, backup)
+    changes = Counter()
+    for row in rows:
+        new = sni_to_app(row["sni"]) or row["label"]
+        if new != row["label"]:
+            changes[(row["label"], new)] += 1
+            row["label"] = new
+        row["converter_version"] = CONVERTER_VERSION
+    with open(args.csv, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=HEADER)
+        w.writeheader()
+        w.writerows(rows)
+    print(f"backup: {backup}")
+    for (old, new), n in changes.most_common():
+        print(f"  {old} -> {new}: {n}")
+    print(f"relabelled {sum(changes.values())} of {len(rows)} flows")
+
+
+def cmd_merge(args):
+    """Append rows from other CSVs (e.g. a teammate's) into --csv, skipping captures already present."""
+    seen = existing_hashes(args.csv)
+    new_file = not os.path.exists(args.csv)
+    added = Counter()
+    with open(args.csv, "a", newline="", encoding="utf-8") as out:
+        w = csv.DictWriter(out, fieldnames=HEADER)
+        if new_file:
+            w.writeheader()
+        for path in args.others:
+            with open(path, newline="", encoding="utf-8") as fh:
+                r = csv.DictReader(fh)
+                if r.fieldnames != HEADER:
+                    sys.exit(f"{path}: unexpected header (different converter version?)")
+                rows = list(r)
+            skipped = 0
+            for row in rows:
+                if row["source_sha256"] in seen:
+                    skipped += 1
+                    continue
+                row["label"] = sni_to_app(row["sni"]) or row["label"]
+                row["converter_version"] = CONVERTER_VERSION
+                w.writerow(row)
+                added[path] += 1
+            seen |= {row["source_sha256"] for row in rows}
+            print(f"{path}: added {added[path]}, skipped {skipped} (captures already in {args.csv})")
+    print(f"merged into {args.csv}")
+
+
 def cmd_report(args):
     if not os.path.exists(args.csv):
         sys.exit(f"{args.csv} does not exist yet.")
@@ -325,8 +392,14 @@ def main():
     r.add_argument("--csv", default=DEFAULT_CSV)
     r.add_argument("--target", type=int, default=200)
     r.add_argument("--top", type=int, default=25)
+    rl = sub.add_parser("relabel", help="recompute labels from stored SNIs with the current rules")
+    rl.add_argument("--csv", default=DEFAULT_CSV)
+    m = sub.add_parser("merge", help="append a teammate's CSV(s) into --csv")
+    m.add_argument("others", nargs="+")
+    m.add_argument("--csv", default=DEFAULT_CSV)
     args = ap.parse_args()
-    {"convert": cmd_convert, "report": cmd_report}[args.cmd](args)
+    {"convert": cmd_convert, "report": cmd_report, "relabel": cmd_relabel,
+     "merge": cmd_merge}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -89,6 +89,8 @@ def test_sni_mapping():
     assert m("gateway.discord.gg") == "discord"
     assert m("www.google.com") == "other"
     assert m("cloudflare-ech.com") is None
+    assert m("instagram.fhyd2-1.fna.fbcdn.net") == "instagram"
+    assert m("scontent.fhyd2-1.fna.fbcdn.net") == "facebook-web"
 
 
 def test_row_shape():
