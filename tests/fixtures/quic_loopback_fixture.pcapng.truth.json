@@ -1,0 +1,37 @@
+[
+  {
+    "case": "youtube_v4",
+    "sni": "rr1---sn-test.googlevideo.com",
+    "host": "127.0.0.1",
+    "bytes": 60000,
+    "split_client_hello": false
+  },
+  {
+    "case": "instagram_split",
+    "sni": "scontent.cdninstagram.com",
+    "host": "127.0.0.1",
+    "bytes": 60000,
+    "split_client_hello": true
+  },
+  {
+    "case": "other_v4",
+    "sni": "www.example.org",
+    "host": "127.0.0.1",
+    "bytes": 60000,
+    "split_client_hello": false
+  },
+  {
+    "case": "ech_outer",
+    "sni": "cloudflare-ech.com",
+    "host": "127.0.0.1",
+    "bytes": 60000,
+    "split_client_hello": false
+  },
+  {
+    "case": "spotify_short",
+    "sni": "open.spotify.com",
+    "host": "127.0.0.1",
+    "bytes": 50,
+    "split_client_hello": false
+  }
+]

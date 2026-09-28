@@ -272,3 +272,20 @@ h2 {
     background: rgba(255, 255, 255, 0.05);
     border-radius: 5px;
 }
+
+/* ---- v2 additions ---- */
+.app-btn.active { outline: 2px solid var(--accent-1); }
+.legend { font-size: 0.8rem; opacity: 0.8; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.dot.up { background: var(--accent-1); }
+.dot.down { background: var(--primary); }
+.truth { margin-top: 1rem; line-height: 1.5; }
+.truth small { opacity: 0.7; word-break: break-all; }
+.ok { color: #4ade80; font-weight: 700; }
+.bad { color: #f87171; font-weight: 700; }
+.metrics-panel { margin-top: 2rem; overflow-x: auto; }
+table.metrics { width: 100%; border-collapse: collapse; }
+table.metrics th, table.metrics td { padding: 0.5rem 0.75rem; text-align: left;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+table.metrics tr.hl td { background: rgba(255, 255, 255, 0.06); }
+.note { font-size: 0.8rem; opacity: 0.75; }

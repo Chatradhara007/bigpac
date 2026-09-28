@@ -1,70 +1,96 @@
-from flask import Flask, request, jsonify, send_from_directory
-import joblib
-import os
-import numpy as np
+"""
+BigPAC web demo (v2). Shows the v2 model on REAL held-out live flows: flows from
+a capture session the model never saw in training (data/demo_samples.json,
+written by train_v2.py). Each flow's true app comes from its server name (SNI),
+which the model never sees.
+
+  python app.py        then open http://127.0.0.1:5000
+"""
 import json
-
-app = Flask(__name__, static_folder='static')
-
-# Load model (N=15)
-MODEL_PATH = 'models/rf_model_n15.joblib'
-try:
-    model = joblib.load(MODEL_PATH)
-    print(f"Loaded model from {MODEL_PATH}")
-except Exception as e:
-    print(f"Error loading model: {e}")
-    model = None
-
+import os
 import random
 
-# Load real samples for the UI simulator
-try:
-    with open('data/real_samples.json', 'r') as f:
-        real_samples = json.load(f)
-except:
-    real_samples = {}
+import joblib
+import numpy as np
+from flask import Flask, jsonify, request, send_from_directory
 
-@app.route('/')
+import features as F
+
+MODEL_PATH = "models/bigpac_v2.joblib"
+SAMPLES_PATH = "data/demo_samples.json"
+RESULTS = {"stage5": "results/stage5_train_v2.json", "stage2": "results/stage2_baseline.json"}
+
+app = Flask(__name__, static_folder="static")
+bundle = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
+samples = []
+if os.path.exists(SAMPLES_PATH):
+    with open(SAMPLES_PATH, encoding="utf-8") as fh:
+        samples = json.load(fh)["flows"]
+by_label = {}
+for s in samples:
+    by_label.setdefault(s["label"], []).append(s)
+print(f"model: {MODEL_PATH if bundle else 'MISSING - run train_v2.py'}; "
+      f"{len(samples)} held-out demo flows")
+
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+@app.route("/")
 def index():
-    return send_from_directory(app.static_folder, 'index.html')
+    return send_from_directory(app.static_folder, "index.html")
 
-@app.route('/get_sample/<app_name>')
-def get_sample(app_name):
-    if app_name in real_samples and len(real_samples[app_name]) > 0:
-        sample = random.choice(real_samples[app_name])
-        return jsonify({"features": sample})
-    return jsonify({"error": "No samples found"}), 404
 
-@app.route('/predict', methods=['POST'])
+@app.route("/apps")
+def apps():
+    return jsonify({k: len(v) for k, v in sorted(by_label.items())})
+
+
+@app.route("/get_sample/<label>")
+def get_sample(label):
+    pool = samples if label == "any" else by_label.get(label, [])
+    if not pool:
+        return jsonify({"error": f"no held-out flows for {label}"}), 404
+    return jsonify(random.choice(pool))
+
+
+@app.route("/predict", methods=["POST"])
 def predict():
-    if model is None:
-        return jsonify({"error": "Model not loaded"}), 500
-        
-    data = request.json
-    features = data.get("features", [])
-    
-    if len(features) != 45: # 15 packets * 3 features (size, dir, iat)
-        return jsonify({"error": f"Expected 45 features, got {len(features)}"}), 400
-        
-    # Convert to 2D array for sklearn
-    X = np.array(features).reshape(1, -1)
-    
-    # Predict
-    prediction = model.predict(X)[0]
-    probabilities = model.predict_proba(X)[0]
-    
-    # Get top 3 classes
-    classes = model.classes_
-    top_indices = np.argsort(probabilities)[::-1][:3]
-    top_predictions = [{"class": classes[i], "prob": float(probabilities[i])} for i in top_indices]
-    
-    return jsonify({
-        "prediction": prediction,
-        "confidence": float(probabilities[top_indices[0]]),
-        "top_3": top_predictions
-    })
+    if bundle is None:
+        return jsonify({"error": "model not loaded; run train_v2.py"}), 500
+    pkts = (request.json or {}).get("packets", [])
+    if not pkts or any(len(p) != 3 for p in pkts):
+        return jsonify({"error": "expected packets: [[size, dir, iat_ms], ...]"}), 400
+    x = F.features_from_packets([tuple(map(float, p)) for p in pkts], bundle["use_iat"])
+    p = bundle["model"].predict_proba(x)[0]
+    order = np.argsort(p)[::-1]
+    classes = bundle["classes"]
+    top, conf = classes[order[0]], float(p[order[0]])
+    pred = top if conf >= bundle["threshold"] else "UNKNOWN"
+    return jsonify({"prediction": pred, "confidence": conf, "threshold": bundle["threshold"],
+                    "top_3": [{"class": classes[i], "prob": float(p[i])} for i in order[:3]]})
 
-if __name__ == '__main__':
-    # Ensure static folder exists
-    os.makedirs('static', exist_ok=True)
-    app.run(debug=True, port=5000)
+
+@app.route("/results")
+def results():
+    s5, s2 = load_json(RESULTS["stage5"]), load_json(RESULTS["stage2"])
+    out = {"cesnet_reported_old": 0.9707}
+    if s2:
+        out["old_live_all_captures"] = {"known_accuracy": s2["known_accuracy"],
+                                        "open_accuracy": s2["open_world_accuracy"]}
+    if s5:
+        r = s5["results"]
+        out["test_source"] = s5["args"]["test_source"]
+        out["new_heldout"] = r["with_threshold"]
+        out["old_heldout"] = r.get("old_model")
+        out["new_cesnet_test"] = r["cesnet_test"]
+    return jsonify(out)
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000, debug=False)

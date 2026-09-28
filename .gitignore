@@ -27,7 +27,10 @@ venv.bak/
 # Project specific
 data/
 models/
-results/
+# results/ is committed: it holds the evidence for every reported number
 __pycache__/
 *.joblib
 *.parquet
+.pytest_cache/
+# created by running the fixture test with %TEMP% in PowerShell
+%TEMP%/

@@ -1,0 +1,45 @@
+live flows=1948 known=830 other/non-target=1118
+
+=== Closed-world: known-app live flows only ===
+              precision    recall  f1-score   support
+
+     discord      1.000     0.667     0.800        18
+facebook-web      0.033     0.009     0.014       109
+ google-play      0.053     0.222     0.086        45
+   instagram      0.165     0.151     0.157        93
+    snapchat      0.333     0.135     0.192        52
+     spotify      0.278     0.052     0.088       191
+    whatsapp      0.000     0.000     0.000        98
+     youtube      0.441     0.902     0.592       224
+
+    accuracy                          0.308       830
+   macro avg      0.288     0.267     0.241       830
+weighted avg      0.251     0.308     0.234       830
+
+confusion (rows=true, cols=pred):
+               discord  facebook-web  google-play  instagram  snapchat  spotify  whatsapp  youtube
+discord            12             0            1          0         1        0         0        4
+facebook-web        0             1            2         32         7        0         0       67
+google-play         0             0           10          0         0        0         0       35
+instagram           0            13           13         14         0        0         0       53
+snapchat            0             0           16          4         7        8         0       17
+spotify             0             0          116          0         6       10         0       59
+whatsapp            0            16           26         35         0        0         0       21
+youtube             0             0            4          0         0       18         0      202
+
+=== Open-world: all live flows (model has no 'other', so every 'other' flow is wrong) ===
+open-world accuracy: 0.1314
+'other' flows predicted as: {'youtube': 806, 'google-play': 154, 'spotify': 90, 'discord': 58, 'instagram': 6, 'snapchat': 4}
+
+=== By network ===
+home-laptop    n= 724 acc=0.312
+home-phone     n=  91 acc=0.264
+test-laptop    n=  15 acc=0.400
+
+=== Confidence ===
+mean top-prob, correct: 0.337  wrong(known): 0.301  other: 0.288
+
+shift AUC (CESNET vs live, 5-fold): 0.9999
+top shifted features: [('pkt_iat_1', np.float64(0.165)), ('pkt_size_1', np.float64(0.122)), ('pkt_iat_3', np.float64(0.109)), ('pkt_size_2', np.float64(0.1)), ('pkt_dir_1', np.float64(0.074)), ('pkt_iat_4', np.float64(0.044)), ('pkt_iat_6', np.float64(0.04)), ('pkt_size_7', np.float64(0.038)), ('pkt_size_3', np.float64(0.032)), ('pkt_iat_2', np.float64(0.032))]
+
+ {'known_accuracy': 0.30843373493975906, 'known_macro_f1': 0.24122383565317057, 'open_world_accuracy': 0.13141683778234087, 'shift_auc': np.float64(0.9999291343570361), 'n_live': 1948, 'n_known': 830}
